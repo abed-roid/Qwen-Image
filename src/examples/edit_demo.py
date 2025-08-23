@@ -6,6 +6,8 @@ import spaces
 import os
 import base64
 import json
+import shutil
+import time
 
 from PIL import Image
 
@@ -247,7 +249,20 @@ def infer_fast(
       - Keeps negative prompt hardcoded to blank (File 1)
     """
     negative_prompt = " "
+    dir_path = "/tmp/gradio"
 
+    if os.path.exists(dir_path) and os.path.isdir(dir_path):
+        # Count only subdirectories
+        folder_count = sum(1 for entry in os.scandir(dir_path) if entry.is_dir())
+
+        if folder_count > 100:
+            time.sleep(1)
+            shutil.rmtree(dir_path)
+            print(f"Deleted: {dir_path} (had {folder_count} folders)")
+        else:
+            print(f"Folder count = {folder_count}, no deletion needed.")
+    else:
+        print(f"Directory not found: {dir_path}")
     if randomize_seed:
         seed = random.randint(0, MAX_SEED)
     dvc = "cuda" if torch.cuda.is_available() else "cpu"
