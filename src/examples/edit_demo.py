@@ -153,6 +153,7 @@ def infer_full(
     num_inference_steps: int = 50,
     width: int = 1024,
     height: int = 1024,
+    ootd: float = 1.0,
     rewrite_prompt: bool = False,         # default locked false
     num_images_per_prompt: int = 1,       # default locked 1
     progress=gr.Progress(track_tqdm=True),
@@ -224,7 +225,18 @@ pipe = QwenImageEditPipeline.from_pretrained(
 
 pipe.load_lora_weights(
     "lightx2v/Qwen-Image-Lightning",
-    weight_name="Qwen-Image-Lightning-8steps-V1.1.safetensors"
+    weight_name="Qwen-Image-Lightning-8steps-V1.1.safetensors",
+    adapter_name="lightning"
+)
+pipe.load_lora_weights(
+    "/root/Qwen-Image/src/examples/ootd_colour-19-3600.safetensors",
+    adapter_name="realism"
+)
+
+# Now set their influence
+pipe.set_adapters(
+    ["lightning", "realism"],
+    adapter_weights=[1, 0.65]   # Lightning at 0.4, Realism at 0.7
 )
 pipe.enable_model_cpu_offload()
 generator = torch.Generator(device="cuda").manual_seed(42)
@@ -238,6 +250,7 @@ def infer_fast(
     num_inference_steps: int = 50,      # will be overridden to 8 (Lightning preset)
     width: int = 1024,
     height: int = 1024,
+    ootd: float = 1.0,
     rewrite_prompt: bool = False,       # default locked false
     num_images_per_prompt: int = 1,     # locked to 1
     progress=gr.Progress(track_tqdm=True),
@@ -250,6 +263,10 @@ def infer_fast(
     """
     negative_prompt = " "
     dir_path = "/tmp/gradio"
+    pipe.set_adapters(
+        ["lightning", "realism"],
+        adapter_weights=[1, ootd]   # Lightning at 0.4, Realism at 0.7
+    )
 
     if os.path.exists(dir_path) and os.path.isdir(dir_path):
         # Count only subdirectories
@@ -293,6 +310,7 @@ def infer_dispatch(
     num_inference_steps=50,
     width=1024,
     height=1024,
+    ootd=1.0,
     rewrite_prompt=False,            # locked default
     num_images_per_prompt=1,         # locked default
     fast=True,                       # locked default
@@ -301,12 +319,12 @@ def infer_dispatch(
     if fast:
         return infer_fast(
             image, prompt, seed, randomize_seed, true_guidance_scale,
-            num_inference_steps, width, height, rewrite_prompt, num_images_per_prompt
+            num_inference_steps, width, height, ootd, rewrite_prompt, num_images_per_prompt
         )
     else:
         return infer_full(
             image, prompt, seed, randomize_seed, true_guidance_scale,
-            num_inference_steps, width, height, rewrite_prompt, num_images_per_prompt
+            num_inference_steps, width, height, ootd, rewrite_prompt, num_images_per_prompt
         )
 
 # =========================
@@ -350,6 +368,7 @@ with gr.Blocks(css=css) as demo:
                 # REMOVED: num_images_per_prompt_in (locked to 1)
                 width = gr.Slider(label="Width", minimum=256, maximum=4096, step=1, value=1024)
                 height = gr.Slider(label="Height", minimum=256, maximum=4096, step=1, value=1024)
+                ootd = gr.Slider(label="OOTD", minimum=0.0, maximum=1.0, step=0.01, value=1.0)
                 # REMOVED: rewrite_prompt_in (locked to False)
 
         # REMOVED: fast_checkbox UI (locked to True)
@@ -376,6 +395,7 @@ with gr.Blocks(css=css) as demo:
             num_inference_steps_in,
             width,
             height,
+            ootd,
             rewrite_prompt_state,          # locked False
             num_images_per_prompt_state,   # locked 1
             fast_state,                    # locked True
@@ -396,6 +416,7 @@ with gr.Blocks(css=css) as demo:
             num_inference_steps_in,
             width,
             height,
+            ootd,
             rewrite_prompt_state,          # locked False
             num_images_per_prompt_state,   # locked 1
         ],
@@ -415,6 +436,7 @@ with gr.Blocks(css=css) as demo:
             num_inference_steps_in,
             width,
             height,
+            ootd,
             rewrite_prompt_state,          # locked False
             num_images_per_prompt_state,   # locked 1
         ],
