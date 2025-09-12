@@ -8,6 +8,8 @@ import base64
 import json
 import shutil
 import time
+import asyncio
+import datetime
 
 from PIL import Image
 
@@ -80,6 +82,15 @@ Please strictly follow the rewriting rules below:
    "Rewritten": "..."
 }
 '''
+async def ping():
+    # tiny await to prove loop is alive
+    await asyncio.sleep(0)
+    return {
+        "status": "running",
+        "message": "pong",
+        "time_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
 def encode_image(pil_image):
     import io
     buffered = io.BytesIO()
@@ -424,6 +435,8 @@ with gr.Blocks(css=css) as demo:
         api_name="generate_fast"
     )
 
+    out = gr.JSON(visible=False)
+    demo.load(fn=ping, inputs=None, outputs=out, api_name="ping", queue=False)
     # Explicit full endpoint -> /api/predict/generate_full
     api_only_full.click(
         fn=infer_full,
