@@ -1,19 +1,20 @@
+import os
+import time
+import json
+import base64
+import random
+import threading
+import asyncio
+import logging
+from datetime import datetime, timezone
+
 import gradio as gr
 import numpy as np
-import random
 import torch
 import spaces
-import os
-import base64
-import json
-import shutil
-import time
-import asyncio
-import datetime
-
 from PIL import Image
 
-# ---- Diffusers / Transformers (both variants) ----
+# ---- Diffusers / Transformers ----
 from transformers import BitsAndBytesConfig as TransformersBitsAndBytesConfig
 from transformers import Qwen2_5_VLForConditionalGeneration
 
@@ -21,7 +22,16 @@ from diffusers import BitsAndBytesConfig as DiffusersBitsAndBytesConfig
 from diffusers import QwenImageEditPipeline, QwenImageTransformer2DModel
 
 # =========================
-# Shared: Prompt Polisher
+# Logging
+# =========================
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# =========================
+# Prompt Polisher
 # =========================
 SYSTEM_PROMPT = '''
 # Edit Instruction Rewriter
@@ -38,123 +48,249 @@ Please strictly follow the rewriting rules below:
 ## 2. Task Type Handling Rules
 ### 1. Add, Delete, Replace Tasks
 - If the instruction is clear (already includes task type, target entity, position, quantity, attributes), preserve the original intent and only refine the grammar.
-- If the description is vague, supplement with minimal but sufficient details (category, color, size, orientation, position, etc.). For example:
-    > Original: "Add an animal"
-    > Rewritten: "Add a light-gray cat in the bottom-right corner, sitting and facing the camera"
-- Remove meaningless instructions: e.g., "Add 0 objects" should be ignored or flagged as invalid.
+- If the description is vague, supplement with minimal but sufficient details (category, color, size, orientation, position, etc.).
+- Remove meaningless instructions (e.g., "Add 0 objects").
 - For replacement tasks, specify "Replace Y with X" and briefly describe the key visual features of X.
 
 ### 2. Text Editing Tasks
 - All text content must be enclosed in English double quotes `" "`. Do not translate or alter the original language of the text, and do not change the capitalization.
-- **For text replacement tasks, always use the fixed template:**
+- For text replacement tasks, always use:
     - `Replace "xx" to "yy"`.
     - `Replace the xx bounding box to "yy"`.
-- If the user does not specify text content, infer and add concise text based on the instruction and the input image’s context. For example:
-    > Original: "Add a line of text" (poster)
-    > Rewritten: "Add text "LIMITED EDITION" at the top center with slight shadow`
-- Specify text position, color, and layout in a concise way.
+- If no text is given, infer a concise text consistent with the image context.
+- Specify text position, color, and layout concisely.
 
 ### 3. Human Editing Tasks
-- Maintain the person’s core visual consistency (ethnicity, gender, age, hairstyle, expression, outfit, etc.).
-- If modifying appearance (e.g., clothes, hairstyle), ensure the new element is consistent with the original style.
-- **For expression changes, they must be natural and subtle, never exaggerated.**
-- If deletion is not specifically emphasized, the most important subject in the original image (e.g., a person, an animal) should be preserved.
-    - For background change tasks, emphasize maintaining subject consistency at first.
-- Example:
-    > Original: "Change the person’s hat"
-    > Rewritten: "Replace the man’s hat with a dark brown beret; keep smile, short hair, and gray jacket unchanged"
+- Maintain the person’s core visual consistency.
+- Changes (e.g., clothes, hairstyle) must match the original style.
+- Expression changes must be subtle and natural.
+- Preserve the main subject unless deletion is explicit.
 
-### 4. Style Transformation or Enhancement Tasks
-- If a style is specified, describe it concisely with key visual traits. For example:
-    > Original: "Disco style"
-    > Rewritten: "1970s disco: flashing lights, disco ball, mirrored walls, colorful tones"
-- If the instruction says "use reference style" or "keep current style," analyze the input image, extract main features (color, composition, texture, lighting, art style), and integrate them into the prompt.
-- **For coloring tasks, including restoring old photos, always use the fixed template:** "Restore old photograph, remove scratches, reduce noise, enhance details, high resolution, realistic, natural skin tones, clear facial features, no distortion, vintage photo restoration"
-- If there are other changes, place the style description at the end.
+### 4. Style / Enhancement
+- Describe styles concisely using key traits.
+- For “keep current style”, extract dominant features and integrate.
+- For photo restoration, use:
+  "Restore old photograph, remove scratches, reduce noise, enhance details, high resolution, realistic, natural skin tones, clear facial features, no distortion, vintage photo restoration"
 
-## 3. Rationality and Logic Checks
-- Resolve contradictory instructions: e.g., "Remove all trees but keep all trees" should be logically corrected.
-- Add missing key information: if position is unspecified, choose a reasonable area based on composition (near subject, empty space, center/edges).
-
-# Output Format Example
-```json
-{
-   "Rewritten": "..."
-}
+## 3. Logic Checks
+- Resolve contradictions.
+- Fill missing key info (e.g., reasonable position).
 '''
+
 async def ping():
-    # tiny await to prove loop is alive
     await asyncio.sleep(0)
-    return {
+    payload = {
         "status": "running",
         "message": "pong",
         "time_utc": datetime.now(timezone.utc).isoformat(),
     }
+    logger.debug("PING %s", payload["time_utc"])
+    return payload
 
-def encode_image(pil_image):
+def encode_image(pil_image: Image.Image) -> str:
     import io
-    buffered = io.BytesIO()
-    pil_image.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+    buf = io.BytesIO()
+    pil_image.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 def api(prompt, img_list, model="qwen-vl-max-latest", kwargs={}):
     import dashscope
     api_key = os.environ.get('DASH_API_KEY')
     if not api_key:
+        logger.error("DASH_API_KEY is not set")
         raise EnvironmentError("DASH_API_KEY is not set")
     assert model in ["qwen-vl-max-latest"], f"Not implemented model {model}"
+
     sys_promot = "you are a helpful assistant, you should provide useful answers to users."
     messages = [
         {"role": "system", "content": sys_promot},
-        {"role": "user", "content": []}]
+        {"role": "user", "content": []},
+    ]
     for img in img_list:
         messages[1]["content"].append({"image": f"data:image/png;base64,{encode_image(img)}"})
     messages[1]["content"].append({"text": f"{prompt}"})
 
     response_format = kwargs.get('response_format', None)
 
-    response = dashscope.MultiModalConversation.call(
-        api_key=api_key,
-        model=model,
-        messages=messages,
-        result_format='message',
-        response_format=response_format,
-    )
+    t0 = time.perf_counter()
+    try:
+        response = dashscope.MultiModalConversation.call(
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            result_format='message',
+            response_format=response_format,
+        )
+    except Exception:
+        logger.exception("DashScope call failed in %.3fs", time.perf_counter() - t0)
+        raise
 
+    dt = time.perf_counter() - t0
     if response.status_code == 200:
+        logger.info("DashScope ok model=%s duration=%.3fs", model, dt)
         return response.output.choices[0].message.content[0]['text']
     else:
+        logger.error("DashScope error status=%s duration=%.3fs body=%s",
+                     response.status_code, dt, getattr(response, "output_text", ""))
         raise Exception(f'Failed to post: {response}')
 
 def polish_prompt(prompt, img):
     prompt = f"{SYSTEM_PROMPT}\n\nUser Input: {prompt}\n\nRewritten Prompt:"
-    success = False
-    while not success:
+    attempts, t0 = 0, time.perf_counter()
+    while True:
+        attempts += 1
         try:
             result = api(prompt, [img])
             if isinstance(result, str):
-                result = result.replace('```json','').replace('```','')
-                result = json.loads(result)
-            else:
+                result = result.replace('```json', '').replace('```', '')
                 result = json.loads(result)
             polished_prompt = result['Rewritten'].strip().replace("\n", " ")
-            success = True
+            logger.info("polish_prompt success attempts=%d duration=%.3fs",
+                        attempts, time.perf_counter() - t0)
+            return polished_prompt
         except Exception as e:
-            print(f"[Warning] Error during API call: {e}")
-    return polished_prompt
+            logger.warning("polish_prompt attempt=%d error=%s", attempts, e)
 
 # =========================
-# Global / Shared
+# Globals / Concurrency
 # =========================
 dtype = torch.bfloat16
 device = "cuda" if torch.cuda.is_available() else "cpu"
 MAX_SEED = np.iinfo(np.int32).max
 
-# =========================
-# FULL generation (File 2)
-# =========================
-# Keep a single hot pipeline on GPU (as in File 2)
+PIPE_LOCK = threading.Lock()          # protects adapter mutations/calls
+_FAST_GATE = threading.Semaphore(1)   # infer_fast: max 1 concurrent
 
+# One-time init gates (process-wide)
+_INIT_LOCK = threading.Lock()
+_INIT_READY = threading.Event()
+_FAST = {"pipe": None, "model_id": None}
+
+_FULL_INIT_LOCK = threading.Lock()
+_FULL_READY = threading.Event()
+_FULL_PIPE = {"pipe": None}
+
+# =========================
+# Thread-safe one-time init
+# =========================
+def init_models():
+    """
+    Thread-safe, one-time init for the FAST pipeline.
+    First caller initializes; concurrent callers wait until ready.
+    """
+    if _INIT_READY.is_set():
+        return _FAST
+
+    if _INIT_LOCK.acquire(blocking=False):
+        try:
+            if _INIT_READY.is_set():
+                return _FAST
+
+            logger.info("Initializing models (one-time, fast pipe only)")
+            model_id = "Qwen/Qwen-Image-Edit"
+
+            # Quantized transformer (Diffusers) on CPU to avoid CUDA warmup
+            quant_config_diff = DiffusersBitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                llm_int8_skip_modules=["transformer_blocks.0.img_mod"],
+            )
+            transformer = QwenImageTransformer2DModel.from_pretrained(
+                model_id,
+                subfolder="transformer",
+                quantization_config=quant_config_diff,
+                torch_dtype=torch.bfloat16,
+            ).to("cpu")
+
+            # Quantized text encoder (Transformers) on CPU
+            quant_config_tx = TransformersBitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+            )
+            text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model_id,
+                subfolder="text_encoder",
+                quantization_config=quant_config_tx,
+                torch_dtype=torch.bfloat16,
+            ).to("cpu")
+
+            # Fast edit pipeline (CPU offload will migrate as needed)
+            pipe = QwenImageEditPipeline.from_pretrained(
+                model_id,
+                transformer=transformer,
+                text_encoder=text_encoder,
+                torch_dtype=torch.bfloat16
+            )
+
+            # Load LoRAs once
+            pipe.load_lora_weights(
+                "lightx2v/Qwen-Image-Lightning",
+                weight_name="Qwen-Image-Lightning-8steps-V1.1.safetensors",
+                adapter_name="lightning"
+            )
+            pipe.load_lora_weights(
+                "/root/Qwen-Image/src/examples/ootd_colour-19-3600.safetensors",
+                adapter_name="realism"
+            )
+
+            # Default mix (can tweak per-request under PIPE_LOCK)
+            pipe.set_adapters(["lightning", "realism"], adapter_weights=[1, 0.65])
+
+            # One-time: enable cpu offload to control VRAM
+            pipe.enable_model_cpu_offload()
+
+            _FAST["pipe"] = pipe
+            _FAST["model_id"] = model_id
+
+            _INIT_READY.set()
+            logger.info("Fast pipe ready")
+            return _FAST
+        finally:
+            _INIT_LOCK.release()
+    else:
+        _INIT_READY.wait()
+        return _FAST
+
+def init_full():
+    """
+    Thread-safe, one-time init for the FULL pipeline (lazy, on-demand).
+    """
+    if _FULL_READY.is_set():
+        return _FULL_PIPE["pipe"]
+
+    if _FULL_INIT_LOCK.acquire(blocking=False):
+        try:
+            if _FULL_READY.is_set():
+                return _FULL_PIPE["pipe"]
+
+            logger.info("Initializing full pipeline (one-time, on demand)")
+            model_id = _FAST["model_id"] or "Qwen/Qwen-Image-Edit"
+
+            pipe_full = QwenImageEditPipeline.from_pretrained(
+                model_id,
+                torch_dtype=dtype
+            )
+            if device == "cuda":
+                try:
+                    pipe_full = pipe_full.to(device)
+                except torch.cuda.OutOfMemoryError:
+                    logger.warning("OOM moving full pipe to CUDA; enabling CPU offload instead")
+                    pipe_full.enable_model_cpu_offload()
+            _FULL_PIPE["pipe"] = pipe_full
+            _FULL_READY.set()
+            logger.info("Full pipe ready")
+            return pipe_full
+        finally:
+            _FULL_INIT_LOCK.release()
+    else:
+        _FULL_READY.wait()
+        return _FULL_PIPE["pipe"]
+
+# =========================
+# FULL generation
+# =========================
 def infer_full(
     image: Image.Image,
     prompt: str,
@@ -165,28 +301,27 @@ def infer_full(
     width: int = 1024,
     height: int = 1024,
     ootd: float = 1.0,
-    rewrite_prompt: bool = False,         # default locked false
-    num_images_per_prompt: int = 1,       # default locked 1
+    rewrite_prompt: bool = False,
+    num_images_per_prompt: int = 1,
     progress=gr.Progress(track_tqdm=True),
 ):
-    """
-    Mirrors File 2 behavior (full generation):
-      - Uses a global QwenImageEditPipeline on device
-      - Supports negative_prompt and true_cfg_scale
-    """
+    t0 = time.perf_counter()
     negative_prompt = " "
 
-    pipe_full = QwenImageEditPipeline.from_pretrained("Qwen/Qwen-Image-Edit", torch_dtype=dtype).to(device)
+    # Ensure fast is ready (optional) then get full
+    init_models()
+    pipe_full = init_full()
+
     if randomize_seed:
         seed = random.randint(0, MAX_SEED)
-    generator = torch.Generator(device=device).manual_seed(seed)
+    generator = torch.Generator(device=device if device == "cuda" else "cpu").manual_seed(seed)
 
     if rewrite_prompt:
         prompt = polish_prompt(prompt, image)
-        print(f"[Full] Rewritten Prompt: {prompt}")
+        logger.debug("[Full] Rewritten Prompt: %s", prompt)
 
-    print(f"[Full] Seed={seed}, Steps={num_inference_steps}, Guidance={true_guidance_scale}")
-
+    logger.info("[Full] start seed=%s steps=%s guidance=%.3f size=%dx%d",
+                seed, num_inference_steps, true_guidance_scale, width, height)
     images = pipe_full(
         image,
         prompt=prompt,
@@ -198,119 +333,71 @@ def infer_full(
         true_cfg_scale=true_guidance_scale,
         num_images_per_prompt=num_images_per_prompt
     ).images
-
+    logger.info("[Full] done duration=%.3fs", time.perf_counter() - t0)
     return images, seed
 
-model_id = "Qwen/Qwen-Image-Edit"
-
-# Quantized transformer (diffusers)
-quant_config_diff = DiffusersBitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.bfloat16,
-    llm_int8_skip_modules=["transformer_blocks.0.img_mod"],
-)
-transformer = QwenImageTransformer2DModel.from_pretrained(
-    model_id,
-    subfolder="transformer",
-    quantization_config=quant_config_diff,
-    torch_dtype=torch.bfloat16,
-).to("cpu")
-
-# Quantized text encoder (transformers)
-quant_config_tx = TransformersBitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.bfloat16,
-)
-text_encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-    model_id,
-    subfolder="text_encoder",
-    quantization_config=quant_config_tx,
-    torch_dtype=torch.bfloat16,
-).to("cpu")
-
-pipe = QwenImageEditPipeline.from_pretrained(
-    model_id, transformer=transformer, text_encoder=text_encoder, torch_dtype=torch.bfloat16
-)
-
-pipe.load_lora_weights(
-    "lightx2v/Qwen-Image-Lightning",
-    weight_name="Qwen-Image-Lightning-8steps-V1.1.safetensors",
-    adapter_name="lightning"
-)
-pipe.load_lora_weights(
-    "/root/Qwen-Image/src/examples/ootd_colour-19-3600.safetensors",
-    adapter_name="realism"
-)
-
-# Now set their influence
-pipe.set_adapters(
-    ["lightning", "realism"],
-    adapter_weights=[1, 0.65]   # Lightning at 0.4, Realism at 0.7
-)
-pipe.enable_model_cpu_offload()
-generator = torch.Generator(device="cuda").manual_seed(42)
-
+# =========================
+# FAST generation (single-concurrency)
+# =========================
 def infer_fast(
     image: Image.Image,
     prompt: str,
     seed: int = 42,
     randomize_seed: bool = False,
-    true_guidance_scale: float = 1.0,   # kept in signature for symmetry; not used
-    num_inference_steps: int = 50,      # will be overridden to 8 (Lightning preset)
+    true_guidance_scale: float = 1.0,   # kept for symmetry; ignored
+    num_inference_steps: int = 50,      # clamped to 8 (Lightning)
     width: int = 1024,
     height: int = 1024,
     ootd: float = 1.0,
-    rewrite_prompt: bool = False,       # default locked false
-    num_images_per_prompt: int = 1,     # locked to 1
+    rewrite_prompt: bool = False,
+    num_images_per_prompt: int = 1,
     progress=gr.Progress(track_tqdm=True),
 ):
-    """
-    Mirrors File 1 behavior (fast generation):
-      - Builds quantized pipeline + Lightning LoRA (8 steps)
-      - Uses minimal call: pipe(image, prompt, num_inference_steps=8).images
-      - Keeps negative prompt hardcoded to blank (File 1)
-    """
-    negative_prompt = " "
-    dir_path = "/tmp/gradio"
-    pipe.set_adapters(
-        ["lightning", "realism"],
-        adapter_weights=[1, ootd]   # Lightning at 0.4, Realism at 0.7
-    )
+    # Guarantee max 1 concurrent fast job
+    if not _FAST_GATE.acquire(blocking=False):
+        logger.warning("[Fast] rejected: another fast job is running")
+        raise gr.Error("Another fast generation is running. Please try again in a moment.")
+    t0 = time.perf_counter()
+    try:
+        # Thread-safe, one-time init; wait if another request is initializing
+        M = init_models()
+        pipe = M["pipe"]
 
-    if os.path.exists(dir_path) and os.path.isdir(dir_path):
-        # Count only subdirectories
-        folder_count = sum(1 for entry in os.scandir(dir_path) if entry.is_dir())
+        if randomize_seed:
+            seed = random.randint(0, MAX_SEED)
+        dvc = "cuda" if torch.cuda.is_available() else "cpu"
+        generator = torch.Generator(device=dvc).manual_seed(seed)
 
-        if folder_count > 100:
-            time.sleep(1)
-            shutil.rmtree(dir_path)
-            print(f"Deleted: {dir_path} (had {folder_count} folders)")
-        else:
-            print(f"Folder count = {folder_count}, no deletion needed.")
-    else:
-        print(f"Directory not found: {dir_path}")
-    if randomize_seed:
-        seed = random.randint(0, MAX_SEED)
-    dvc = "cuda" if torch.cuda.is_available() else "cpu"
-    generator = torch.Generator(device=dvc).manual_seed(seed)
+        if rewrite_prompt:
+            prompt = polish_prompt(prompt, image)
+            logger.debug("[Fast] Rewritten Prompt: %s", prompt)
 
-    if rewrite_prompt:
-        prompt = polish_prompt(prompt, image)
-        print(f"[Fast] Rewritten Prompt: {prompt}")
+        steps = min(num_inference_steps, 8)
+        logger.info("[Fast] start seed=%s steps=%s size=%dx%d ootd=%.2f",
+                    seed, steps, width, height, ootd)
 
-    print(f"[Fast] Seed={seed}, Steps=8 (Lightning), Guidance param ignored")
+        # If you tweak adapters per request, guard mutation:
+        with PIPE_LOCK:
+            pipe.set_adapters(["lightning", "realism"], adapter_weights=[1, ootd])
+            out = pipe(
+                image,
+                prompt,
+                num_inference_steps=steps,
+                width=width,
+                height=height,
+                generator=generator
+            ).images
 
-    # Force 8 steps for Lightning
-    out = pipe(
-        image, prompt, num_inference_steps=num_inference_steps, width=width, height=height
-    ).images
-
-    return out, seed
+        logger.info("[Fast] done duration=%.3fs", time.perf_counter() - t0)
+        return out, seed
+    except Exception:
+        logger.exception("[Fast] failed duration=%.3fs", time.perf_counter() - t0)
+        raise
+    finally:
+        _FAST_GATE.release()
 
 # =========================
-# Dispatcher (routes by checkbox)
+# Dispatcher
 # =========================
 def infer_dispatch(
     image,
@@ -322,11 +409,13 @@ def infer_dispatch(
     width=1024,
     height=1024,
     ootd=1.0,
-    rewrite_prompt=False,            # locked default
-    num_images_per_prompt=1,         # locked default
-    fast=True,                       # locked default
+    rewrite_prompt=False,
+    num_images_per_prompt=1,
+    fast=True,
     progress=gr.Progress(track_tqdm=True),
 ):
+    logger.debug("dispatch fast=%s seed=%s steps=%s size=%dx%d",
+                 fast, seed, num_inference_steps, width, height)
     if fast:
         return infer_fast(
             image, prompt, seed, randomize_seed, true_guidance_scale,
@@ -376,24 +465,17 @@ with gr.Blocks(css=css) as demo:
             with gr.Row():
                 true_guidance_scale_in = gr.Slider(label="True guidance scale", minimum=1.0, maximum=10.0, step=0.1, value=4.0)
                 num_inference_steps_in = gr.Slider(label="Number of inference steps", minimum=1, maximum=24, step=1, value=8)
-                # REMOVED: num_images_per_prompt_in (locked to 1)
                 width = gr.Slider(label="Width", minimum=256, maximum=4096, step=1, value=1024)
                 height = gr.Slider(label="Height", minimum=256, maximum=4096, step=1, value=1024)
                 ootd = gr.Slider(label="OOTD", minimum=0.0, maximum=1.0, step=0.01, value=1.0)
-                # REMOVED: rewrite_prompt_in (locked to False)
 
-        # REMOVED: fast_checkbox UI (locked to True)
-
-        # Hidden constants (States) to feed locked values
         rewrite_prompt_state = gr.State(False)
         num_images_per_prompt_state = gr.State(1)
         fast_state = gr.State(True)
 
-        # Hidden buttons to expose explicit API endpoints
         api_only_fast = gr.Button(visible=False)
         api_only_full = gr.Button(visible=False)
 
-    # Routed generation (UI + API) -> /api/predict/generate
     gr.on(
         triggers=[run_button.click, prompt_in.submit],
         fn=infer_dispatch,
@@ -407,15 +489,14 @@ with gr.Blocks(css=css) as demo:
             width,
             height,
             ootd,
-            rewrite_prompt_state,          # locked False
-            num_images_per_prompt_state,   # locked 1
-            fast_state,                    # locked True
+            rewrite_prompt_state,
+            num_images_per_prompt_state,
+            fast_state,
         ],
         outputs=[result, seed_in],
         api_name="generate"
     )
 
-    # Explicit fast endpoint -> /api/predict/generate_fast
     api_only_fast.click(
         fn=infer_fast,
         inputs=[
@@ -428,8 +509,8 @@ with gr.Blocks(css=css) as demo:
             width,
             height,
             ootd,
-            rewrite_prompt_state,          # locked False
-            num_images_per_prompt_state,   # locked 1
+            rewrite_prompt_state,
+            num_images_per_prompt_state,
         ],
         outputs=[result, seed_in],
         api_name="generate_fast"
@@ -437,7 +518,7 @@ with gr.Blocks(css=css) as demo:
 
     out = gr.JSON(visible=False)
     demo.load(fn=ping, inputs=None, outputs=out, api_name="ping", queue=False)
-    # Explicit full endpoint -> /api/predict/generate_full
+
     api_only_full.click(
         fn=infer_full,
         inputs=[
@@ -450,12 +531,18 @@ with gr.Blocks(css=css) as demo:
             width,
             height,
             ootd,
-            rewrite_prompt_state,          # locked False
-            num_images_per_prompt_state,   # locked 1
+            rewrite_prompt_state,
+            num_images_per_prompt_state,
         ],
         outputs=[result, seed_in],
         api_name="generate_full"
     )
 
 if __name__ == "__main__":
+    # Optional warmup so first request doesn't pay init cost
+    try:
+        init_models()
+    except Exception:
+        logger.exception("Warmup failed (continuing without warmup)")
+    logger.info("Launching Gradio app on 0.0.0.0:7860")
     demo.launch(server_name="0.0.0.0", server_port=7860)
