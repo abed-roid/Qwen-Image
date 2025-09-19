@@ -1,5 +1,6 @@
 import os
 import time
+import shutil
 import json
 import base64
 import random
@@ -362,6 +363,14 @@ def infer_fast(
         # Thread-safe, one-time init; wait if another request is initializing
         M = init_models()
         pipe = M["pipe"]
+
+        folder_path = "/tmp/gradio"
+
+        if os.path.exists(folder_path):
+            shutil.rmtree(folder_path)
+            print(f"Deleted: {folder_path}")
+        else:
+            print(f"Folder not found: {folder_path}")
 
         if randomize_seed:
             seed = random.randint(0, MAX_SEED)
