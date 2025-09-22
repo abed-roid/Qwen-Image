@@ -235,9 +235,13 @@ def init_models():
                 "/root/Qwen-Image/src/examples/ootd_colour-19-3600.safetensors",
                 adapter_name="realism"
             )
+            pipe.load_lora_weights(
+                "/root/Qwen-Image/src/examples/aldniki_qwen_figure_maker_v01.safetensors",
+                adapter_name="figure"
+            )
 
             # Default mix (can tweak per-request under PIPE_LOCK)
-            pipe.set_adapters(["lightning", "realism"], adapter_weights=[1, 0.65])
+            pipe.set_adapters(["lightning", "realism", "figure"], adapter_weights=[1, 0.65, 0])
 
             # One-time: enable cpu offload to control VRAM
             pipe.enable_model_cpu_offload()
@@ -302,6 +306,7 @@ def infer_full(
     width: int = 1024,
     height: int = 1024,
     ootd: float = 1.0,
+    figure: float = 0.0,
     rewrite_prompt: bool = False,
     num_images_per_prompt: int = 1,
     progress=gr.Progress(track_tqdm=True),
@@ -350,6 +355,7 @@ def infer_fast(
     width: int = 1024,
     height: int = 1024,
     ootd: float = 1.0,
+    figure: float = 0.0,
     rewrite_prompt: bool = False,
     num_images_per_prompt: int = 1,
     progress=gr.Progress(track_tqdm=True),
@@ -387,7 +393,7 @@ def infer_fast(
 
         # If you tweak adapters per request, guard mutation:
         with PIPE_LOCK:
-            pipe.set_adapters(["lightning", "realism"], adapter_weights=[1, ootd])
+            pipe.set_adapters(["lightning", "realism"], adapter_weights=[1, ootd, figure])
             out = pipe(
                 image,
                 prompt,
@@ -418,6 +424,7 @@ def infer_dispatch(
     width=1024,
     height=1024,
     ootd=1.0,
+    figure=0.0,
     rewrite_prompt=False,
     num_images_per_prompt=1,
     fast=True,
@@ -428,12 +435,12 @@ def infer_dispatch(
     if fast:
         return infer_fast(
             image, prompt, seed, randomize_seed, true_guidance_scale,
-            num_inference_steps, width, height, ootd, rewrite_prompt, num_images_per_prompt
+            num_inference_steps, width, height, ootd, figure, rewrite_prompt, num_images_per_prompt
         )
     else:
         return infer_full(
             image, prompt, seed, randomize_seed, true_guidance_scale,
-            num_inference_steps, width, height, ootd, rewrite_prompt, num_images_per_prompt
+            num_inference_steps, width, height, ootd, figure, rewrite_prompt, num_images_per_prompt
         )
 
 # =========================
@@ -477,6 +484,7 @@ with gr.Blocks(css=css) as demo:
                 width = gr.Slider(label="Width", minimum=256, maximum=4096, step=1, value=1024)
                 height = gr.Slider(label="Height", minimum=256, maximum=4096, step=1, value=1024)
                 ootd = gr.Slider(label="OOTD", minimum=0.0, maximum=1.0, step=0.01, value=1.0)
+                figure = gr.Slider(label="Figure", minimum=0.0, maximum=1.0, step=0.01, value=0.0)
 
         rewrite_prompt_state = gr.State(False)
         num_images_per_prompt_state = gr.State(1)
@@ -498,6 +506,7 @@ with gr.Blocks(css=css) as demo:
             width,
             height,
             ootd,
+            figure,
             rewrite_prompt_state,
             num_images_per_prompt_state,
             fast_state,
@@ -518,6 +527,7 @@ with gr.Blocks(css=css) as demo:
             width,
             height,
             ootd,
+            figure,
             rewrite_prompt_state,
             num_images_per_prompt_state,
         ],
@@ -540,6 +550,7 @@ with gr.Blocks(css=css) as demo:
             width,
             height,
             ootd,
+            figure,
             rewrite_prompt_state,
             num_images_per_prompt_state,
         ],
