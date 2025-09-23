@@ -393,7 +393,7 @@ def infer_fast(
 
         # If you tweak adapters per request, guard mutation:
         with PIPE_LOCK:
-            pipe.set_adapters(["lightning", "realism"], adapter_weights=[1, ootd, figure])
+            pipe.set_adapters(["lightning", "realism", "figure"], adapter_weights=[1, ootd, figure])
             out = pipe(
                 image,
                 prompt,
