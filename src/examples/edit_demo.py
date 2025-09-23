@@ -228,7 +228,7 @@ def init_models():
             # Load LoRAs once
             pipe.load_lora_weights(
                 "lightx2v/Qwen-Image-Lightning",
-                weight_name="Qwen-Image-Lightning-8steps-V1.1.safetensors",
+                weight_name="Qwen-Image-Lightning-8steps-V2.0.safetensors",
                 adapter_name="lightning"
             )
             pipe.load_lora_weights(
