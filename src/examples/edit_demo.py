@@ -9,6 +9,9 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
+import uuid
+from typing import Dict
+
 import gradio as gr
 import numpy as np
 import torch
@@ -342,6 +345,42 @@ def infer_full(
     logger.info("[Full] done duration=%.3fs", time.perf_counter() - t0)
     return images, seed
 
+TMP_DIR = "/tmp/gradio"
+FILE_REGISTRY: Dict[str, float] = {}
+FILE_REGISTRY_LOCK = threading.Lock()
+
+def _register_file(path: str) -> None:
+    """Add/refresh a file's timestamp in the registry."""
+    with FILE_REGISTRY_LOCK:
+        FILE_REGISTRY[path] = time.time()
+
+def _cleanup_old_files(max_age_sec: int = 300) -> None:
+    """
+    Delete files whose recorded creation time is older than max_age_sec.
+    Missing files are silently ignored. Stale registry entries are pruned.
+    """
+    now = time.time()
+    to_delete = []
+    with FILE_REGISTRY_LOCK:
+        # Snapshot to avoid mutation during iteration
+        items = list(FILE_REGISTRY.items())
+
+    for path, created_ts in items:
+        if now - created_ts > max_age_sec:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                # Best-effort cleanup: continue even if one file fails
+                pass
+            finally:
+                to_delete.append(path)
+
+    if to_delete:
+        with FILE_REGISTRY_LOCK:
+            for p in to_delete:
+                FILE_REGISTRY.pop(p, None)
+
 # =========================
 # FAST generation (single-concurrency)
 # =========================
@@ -366,9 +405,11 @@ def infer_fast(
         raise gr.Error("Another fast generation is running. Please try again in a moment.")
     t0 = time.perf_counter()
     try:
+        _cleanup_old_files(max_age_sec=300)
         # Thread-safe, one-time init; wait if another request is initializing
         M = init_models()
         pipe = M["pipe"]
+        os.makedirs(TMP_DIR, exist_ok=True)
 
         folder_path = "/tmp/gradio"
 
@@ -402,6 +443,19 @@ def infer_fast(
                 height=height,
                 generator=generator
             ).images
+
+        # 2) Save result images to TMP_DIR and register them for future cleanup
+        #    (Keep returning PIL images as before; this just adds housekeeping.)
+        saved_paths = []
+        for idx, img in enumerate(out):
+            fname = f"{uuid.uuid4().hex}_{idx}.png"
+            fpath = os.path.join(TMP_DIR, fname)
+            try:
+                img.save(fpath)  # PNG; change to .webp if you prefer
+                _register_file(fpath)
+                saved_paths.append(fpath)
+            except Exception as e:
+                logger.warning("Failed to save result image %s: %s", fpath, e)
 
         logger.info("[Fast] done duration=%.3fs", time.perf_counter() - t0)
         return out, seed
