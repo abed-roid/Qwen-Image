@@ -363,9 +363,9 @@ def _cleanup_old_files(max_age_sec: int = 18000) -> None:
                 print(f"Deleted: {TMP_DIR}")
             else:
                 print(f"Folder not found: {TMP_DIR}")
-            except Exception:
+        except Exception:
                 # Best-effort cleanup: continue even if one file fails
-                pass
+            pass
 
 # =========================
 # FAST generation (single-concurrency)
