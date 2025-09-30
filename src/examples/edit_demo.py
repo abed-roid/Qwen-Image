@@ -405,19 +405,12 @@ def infer_fast(
         raise gr.Error("Another fast generation is running. Please try again in a moment.")
     t0 = time.perf_counter()
     try:
+        os.makedirs(TMP_DIR, exist_ok=True)
         _cleanup_old_files(max_age_sec=300)
         # Thread-safe, one-time init; wait if another request is initializing
         M = init_models()
         pipe = M["pipe"]
         os.makedirs(TMP_DIR, exist_ok=True)
-
-        folder_path = "/tmp/gradio"
-
-        if os.path.exists(folder_path):
-            shutil.rmtree(folder_path)
-            print(f"Deleted: {folder_path}")
-        else:
-            print(f"Folder not found: {folder_path}")
 
         if randomize_seed:
             seed = random.randint(0, MAX_SEED)
