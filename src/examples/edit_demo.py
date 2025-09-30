@@ -353,6 +353,7 @@ def _cleanup_old_files(max_age_sec: int = 18000) -> None:
     Delete files whose recorded creation time is older than max_age_sec.
     Missing files are silently ignored. Stale registry entries are pruned.
     """
+    global LAST_TIME
     now = time.time()
     if now - LAST_TIME > max_age_sec:
         try:
