@@ -32,7 +32,7 @@ except ImportError:
 THRESHOLD = 0.8          # 85% of total system RAM
 INTERVAL_SEC = 1.0        # sampling interval
 WINDOW_SEC = 15.0         # sliding window size to smooth spikes
-GRACE_SEC = 5.0           # must be above threshold for at least this long
+GRACE_SEC = 60.0           # must be above threshold for at least this long
 KILL_WAIT_SEC = 5.0       # wait time after SIGTERM before SIGKILL
 DRY_RUN = False           # if True, never actually kill; just log what would happen
 LOG_PATH = "/var/log/memkiller.log"
