@@ -141,72 +141,73 @@ def main():
 
     total_ram = psutil.virtual_memory().total
     logger.info(
-        f"Start threshold={THRESHOLD*100:.1f}% window={WINDOW_SEC:.1f}s "
-        f"interval={INTERVAL_SEC:.1f}s grace={GRACE_SEC:.1f}s dry_run={DRY_RUN} "
+        f"Start threshold={THRESHOLD*100:.1f}% grace={GRACE_SEC:.1f}s "
+        f"interval={INTERVAL_SEC:.1f}s dry_run={DRY_RUN} "
         f"total_ram={total_ram/1024/1024:.1f} MiB"
     )
 
-    # PID -> deque[(timestamp, rss_bytes)]
-    samples: dict[int, deque] = defaultdict(lambda: deque())
+    # PID -> timestamp when it first exceeded the threshold
+    exceed_since: dict[int, float] = {}
 
     while True:
         now = time.time()
 
-        # Collect samples
         for proc in safe_process_iter():
             pid = proc.pid
+
+            # Skip excluded and vanished processes early
             if is_excluded(proc):
-                # Keep sample buffer small by clearing excluded PIDs
-                if pid in samples:
-                    samples.pop(pid, None)
+                exceed_since.pop(pid, None)
                 continue
 
             try:
                 rss = proc.memory_info().rss
+                pct = percent_of_total(rss, total_ram)
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                samples.pop(pid, None)
+                exceed_since.pop(pid, None)
                 continue
 
-            dq = samples[pid]
-            dq.append((now, rss))
-            # Drop old samples outside the window
-            while dq and (now - dq[0][0]) > WINDOW_SEC:
-                dq.popleft()
-
-        # Evaluate sustained offenders
-        for pid, dq in list(samples.items()):
-            if not dq:
-                samples.pop(pid, None)
-                continue
-            # How long has process been above threshold within window?
-            above = 0.0
-            # Integrate time above threshold between successive samples
-            for i in range(1, len(dq)):
-                t0, rss0 = dq[i - 1]
-                t1, rss1 = dq[i]
-                # Use the later sample to be conservative
-                rss = max(rss0, rss1)
-                if percent_of_total(rss, total_ram) >= THRESHOLD:
-                    above += (t1 - t0)
-
-            if above >= GRACE_SEC:
-                # Try to retrieve fresh proc handle
-                try:
-                    proc = psutil.Process(pid)
-                    # Re-check instant percent before killing
-                    cur_rss = proc.memory_info().rss
-                    cur_pct = percent_of_total(cur_rss, total_ram)
-                    if cur_pct >= THRESHOLD:
-                        reason = (
-                            f"RSS={cur_rss/1024/1024:.1f} MiB "
-                            f"({cur_pct*100:.1f}% of RAM) sustained for {above:.1f}s"
+            if pct >= THRESHOLD:
+                # First time crossing: start grace timer
+                if pid not in exceed_since:
+                    exceed_since[pid] = now
+                    try:
+                        logger.info(
+                            f"PID {pid} ({proc.name()}) crossed {THRESHOLD*100:.1f}% "
+                            f"— starting {GRACE_SEC:.1f}s grace (RSS={rss/1024/1024:.1f} MiB, "
+                            f"{pct*100:.1f}%)"
                         )
-                        kill_process(proc, reason)
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-                finally:
-                    # Clear history so we don't repeatedly kill/log
-                    samples.pop(pid, None)
+                    except Exception:
+                        pass
+
+                # If continuously above for GRACE_SEC, terminate
+                elif now - exceed_since[pid] >= GRACE_SEC:
+                    try:
+                        # Refresh metrics before action
+                        proc = psutil.Process(pid)
+                        cur_rss = proc.memory_info().rss
+                        cur_pct = percent_of_total(cur_rss, total_ram)
+                        if cur_pct >= THRESHOLD:
+                            reason = (
+                                f"exceeded {THRESHOLD*100:.1f}% for >= {GRACE_SEC:.1f}s "
+                                f"(RSS={cur_rss/1024/1024:.1f} MiB, {cur_pct*100:.1f}%)"
+                            )
+                            kill_process(proc, reason)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                    finally:
+                        exceed_since.pop(pid, None)
+            else:
+                # Dropped back below threshold — reset grace timer if present
+                if pid in exceed_since:
+                    try:
+                        logger.info(
+                            f"PID {pid} ({proc.name()}) fell below threshold — "
+                            f"resetting grace timer"
+                        )
+                    except Exception:
+                        pass
+                    exceed_since.pop(pid, None)
 
         time.sleep(INTERVAL_SEC)
 
